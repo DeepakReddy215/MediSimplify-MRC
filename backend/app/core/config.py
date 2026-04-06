@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,7 +8,10 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    mongodb_url: str = "mongodb://localhost:27017"
+    mongodb_url: str = Field(
+        default="mongodb://localhost:27017",
+        validation_alias=AliasChoices("MONGODB_URL", "MONGODB_URI")
+    )
     database_name: str = "medical_report_simplifier"
     secret_key: str
     algorithm: str = "HS256"
