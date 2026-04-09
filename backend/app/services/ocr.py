@@ -6,7 +6,7 @@ from pathlib import Path
 
 import fitz
 import pytesseract
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -63,8 +63,19 @@ if TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 
+def _ensure_tesseract_cmd() -> str | None:
+    global TESSERACT_CMD
+    if TESSERACT_CMD:
+        return TESSERACT_CMD
+
+    TESSERACT_CMD = _resolve_tesseract_cmd()
+    if TESSERACT_CMD:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+    return TESSERACT_CMD
+
+
 def _require_tesseract() -> None:
-    if not TESSERACT_CMD:
+    if not _ensure_tesseract_cmd():
         raise OCRUnavailableError(
             "OCR engine is not available. Install Tesseract or upload a text-based PDF."
         )
@@ -81,9 +92,12 @@ def extract_text_from_file(file_name: str, file_bytes: bytes) -> str:
 
 def _extract_text_from_image(file_bytes: bytes) -> str:
     _require_tesseract()
-    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     try:
+        with Image.open(io.BytesIO(file_bytes)) as raw_image:
+            image = raw_image.convert("RGB")
         text = pytesseract.image_to_string(image)
+    except UnidentifiedImageError as exc:
+        raise OCRUnavailableError("Unsupported or corrupted image file.") from exc
     except pytesseract.TesseractNotFoundError as exc:
         raise OCRUnavailableError(
             "OCR engine is not available. Install Tesseract and retry."
@@ -92,31 +106,31 @@ def _extract_text_from_image(file_bytes: bytes) -> str:
 
 
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-
-    # Prefer embedded/selectable text when available.
-    embedded_text_pages: list[str] = []
-    for page in doc:
-        page_text = page.get_text("text")
-        if page_text and page_text.strip():
-            embedded_text_pages.append(" ".join(page_text.split()))
-
-    if embedded_text_pages:
-        return "\n".join(embedded_text_pages)
-
-    _require_tesseract()
-
-    pages: list[str] = []
-
-    try:
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        # Prefer embedded/selectable text when available.
+        embedded_text_pages: list[str] = []
         for page in doc:
-            pix = page.get_pixmap(dpi=220)
-            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-            page_text = pytesseract.image_to_string(image)
-            pages.append(page_text)
-    except pytesseract.TesseractNotFoundError as exc:
-        raise OCRUnavailableError(
-            "OCR engine is not available. Install Tesseract and retry."
-        ) from exc
+            page_text = page.get_text("text")
+            if isinstance(page_text, str) and page_text.strip():
+                embedded_text_pages.append(" ".join(page_text.split()))
 
-    return "\n".join(" ".join(page.split()) for page in pages if page.strip())
+        if embedded_text_pages:
+            return "\n".join(embedded_text_pages)
+
+        _require_tesseract()
+
+        pages: list[str] = []
+
+        try:
+            for page in doc:
+                pix = page.get_pixmap(dpi=220)
+                with Image.open(io.BytesIO(pix.tobytes("png"))) as raw_image:
+                    image = raw_image.convert("RGB")
+                page_text = pytesseract.image_to_string(image)
+                pages.append(page_text)
+        except pytesseract.TesseractNotFoundError as exc:
+            raise OCRUnavailableError(
+                "OCR engine is not available. Install Tesseract and retry."
+            ) from exc
+
+        return "\n".join(" ".join(page.split()) for page in pages if page.strip())

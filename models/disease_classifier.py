@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ FALLBACK_CLASSIFIER_MODEL = "dmis-lab/biobert-base-cased-v1.2"
 _FINETUNED = None
 _ZERO_SHOT = None
 _DISEASE_TO_ICD = None
+
+ENABLE_ZERO_SHOT_DEFAULT = os.getenv("DISEASE_ENABLE_ZERO_SHOT", "0").strip().lower() in {"1", "true", "yes"}
 
 _RULE_KEYWORDS = {
     "hypertension": ("Hypertension", 0.9),
@@ -84,12 +87,19 @@ def _load_finetuned_classifier() -> tuple[Any, Any, dict[str, int]] | None:
     if not label_path.exists():
         return None
 
-    transformers = importlib.import_module("transformers")
+    try:
+        transformers = importlib.import_module("transformers")
+    except Exception:
+        return None
     AutoTokenizer = getattr(transformers, "AutoTokenizer")
     AutoModelForSequenceClassification = getattr(transformers, "AutoModelForSequenceClassification")
 
-    tokenizer = AutoTokenizer.from_pretrained(str(LOCAL_CLASSIFIER_DIR))
-    model = AutoModelForSequenceClassification.from_pretrained(str(LOCAL_CLASSIFIER_DIR))
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(str(LOCAL_CLASSIFIER_DIR))
+        model = AutoModelForSequenceClassification.from_pretrained(str(LOCAL_CLASSIFIER_DIR))
+        model.eval()
+    except Exception:
+        return None
     label2id = json.loads(label_path.read_text(encoding="utf-8"))
 
     _FINETUNED = (tokenizer, model, label2id)
@@ -101,7 +111,11 @@ def _load_zero_shot_pipeline():
     if _ZERO_SHOT is not None:
         return _ZERO_SHOT
 
-    transformers = importlib.import_module("transformers")
+    try:
+        transformers = importlib.import_module("transformers")
+    except Exception:
+        _ZERO_SHOT = None
+        return _ZERO_SHOT
     pipeline_fn = getattr(transformers, "pipeline")
     try:
         _ZERO_SHOT = pipeline_fn("zero-shot-classification", model="facebook/bart-large-mnli")
@@ -143,12 +157,18 @@ def _finetuned_scores(text: str) -> dict[str, float]:
 
 
 def _finetuned_scores_batch(texts: list[str], batch_size: int = 16) -> list[dict[str, float]]:
+    if not texts:
+        return []
+
     loaded = _load_finetuned_classifier()
     if loaded is None:
         return [{} for _ in texts]
 
     tokenizer, model, label2id = loaded
-    torch = importlib.import_module("torch")
+    try:
+        torch = importlib.import_module("torch")
+    except Exception:
+        return [{} for _ in texts]
 
     id2label = {idx: label for label, idx in label2id.items()}
     all_scores: list[dict[str, float]] = []
@@ -175,7 +195,7 @@ def _finetuned_scores_batch(texts: list[str], batch_size: int = 16) -> list[dict
 def classify_diseases(
     text: str | list[str],
     top_k: int = 5,
-    use_zero_shot: bool = True,
+    use_zero_shot: bool = ENABLE_ZERO_SHOT_DEFAULT,
     batch_size: int = 16,
 ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]:
     disease_to_icd = _load_disease_to_icd_map()
@@ -277,4 +297,7 @@ class DiseaseClassifier:
         raise RuntimeError("Failed to load disease classifier base/fallback model.")
 
     def classify(self, text: str) -> list[dict[str, Any]]:
-        return classify_diseases(text)
+        output = classify_diseases(text)
+        if isinstance(output, list) and (not output or isinstance(output[0], dict)):
+            return output  # type: ignore[return-value]
+        return []
