@@ -1,4 +1,5 @@
 import io
+import subprocess
 import shutil
 from os import environ
 from os import name as os_name
@@ -10,6 +11,11 @@ from PIL import Image, UnidentifiedImageError
 from app.core.config import get_settings
 
 settings = get_settings()
+DEFAULT_TESSERACT_CMD = "/usr/bin/tesseract"
+VERIFY_TESSERACT_ON_STARTUP = environ.get("VERIFY_TESSERACT_ON_STARTUP", "1").strip() == "1"
+
+_TESSERACT_PROBED = False
+_TESSERACT_READY = False
 
 
 class OCRUnavailableError(RuntimeError):
@@ -59,19 +65,72 @@ def _resolve_tesseract_cmd() -> str | None:
 
 
 TESSERACT_CMD = _resolve_tesseract_cmd()
+if not TESSERACT_CMD and os_name != "nt":
+    TESSERACT_CMD = DEFAULT_TESSERACT_CMD
+
 if TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 
-def _ensure_tesseract_cmd() -> str | None:
-    global TESSERACT_CMD
-    if TESSERACT_CMD:
-        return TESSERACT_CMD
+def _probe_tesseract_version() -> bool:
+    global _TESSERACT_PROBED, _TESSERACT_READY
 
-    TESSERACT_CMD = _resolve_tesseract_cmd()
+    if _TESSERACT_PROBED:
+        return _TESSERACT_READY
+
+    cmd = TESSERACT_CMD or "tesseract"
+    try:
+        result = subprocess.run([cmd, "--version"], capture_output=True, text=True)
+        _TESSERACT_READY = result.returncode == 0
+        output = (result.stdout or result.stderr or "").strip()
+        if output:
+            print(output.splitlines()[0])
+    except Exception as exc:
+        _TESSERACT_READY = False
+        print(f"Tesseract version probe failed: {exc}")
+
+    _TESSERACT_PROBED = True
+    return _TESSERACT_READY
+
+
+if VERIFY_TESSERACT_ON_STARTUP:
+    _probe_tesseract_version()
+
+
+def _ensure_tesseract_cmd() -> str | None:
+    global TESSERACT_CMD, _TESSERACT_PROBED, _TESSERACT_READY
+
     if TESSERACT_CMD:
         pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
-    return TESSERACT_CMD
+        if _probe_tesseract_version():
+            return TESSERACT_CMD
+
+    TESSERACT_CMD = _resolve_tesseract_cmd()
+    if not TESSERACT_CMD and os_name != "nt":
+        TESSERACT_CMD = DEFAULT_TESSERACT_CMD
+
+    _TESSERACT_PROBED = False
+    _TESSERACT_READY = False
+
+    if TESSERACT_CMD:
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        if _probe_tesseract_version():
+            return TESSERACT_CMD
+
+    # Last-resort check in case PATH changed at runtime.
+    path_cmd = shutil.which("tesseract")
+    if path_cmd:
+        TESSERACT_CMD = path_cmd
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+        _TESSERACT_PROBED = False
+        _TESSERACT_READY = False
+        if _probe_tesseract_version():
+            return TESSERACT_CMD
+
+    TESSERACT_CMD = None
+    _TESSERACT_PROBED = True
+    _TESSERACT_READY = False
+    return None
 
 
 def _require_tesseract() -> None:
