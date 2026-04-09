@@ -19,6 +19,9 @@ class OCRUnavailableError(RuntimeError):
 def _common_tesseract_candidates() -> list[str]:
     candidates = [
         "tesseract",
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/opt/render/project/.apt/usr/bin/tesseract",
     ]
 
     # Common install paths for Windows users.
