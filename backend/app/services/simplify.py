@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 
@@ -21,6 +22,20 @@ MEDICAL_TERM_MAP = {
 }
 
 IMPORTANT_TERMS = sorted(MEDICAL_TERM_MAP.keys())
+
+PLAIN_LANGUAGE_REPLACEMENTS = {
+    "no evidence of": "does not show",
+    "within normal limits": "looks normal",
+    "unremarkable": "normal",
+    "consistent with": "matches",
+    "suggestive of": "may indicate",
+    "cannot be excluded": "cannot be ruled out",
+    "clinical correlation": "your doctor should compare this with symptoms",
+    "follow-up recommended": "a follow-up check is recommended",
+    "mild": "small",
+    "moderate": "medium",
+    "severe": "serious",
+}
 
 
 def _model_candidates() -> list[str]:
@@ -109,7 +124,7 @@ def _build_prompt(truncated: str, audience: str) -> str:
 
 
 def _fallback_for_audience(cleaned: str, audience: str) -> str:
-    fallback = _replace_medical_terms(cleaned)
+    fallback = _rule_based_simplify(cleaned)
     if audience == "caregiver":
         return (
             "Caregiver-focused explanation:\n"
@@ -151,11 +166,46 @@ def _simplify_for_audience(cleaned: str, audience: str, summarizer) -> str:
             result = tokenizer.decode(output_ids[0], skip_special_tokens=True)
             if not result.strip():
                 raise RuntimeError("Model returned empty simplification")
-            return _replace_medical_terms(_post_process_generated(result))
+            candidate = _replace_medical_terms(_post_process_generated(result))
+            if not _is_too_similar(truncated, candidate):
+                return candidate
         except Exception:
             pass
 
     return _fallback_for_audience(cleaned, audience)
+
+
+def _is_too_similar(source: str, candidate: str) -> bool:
+    source_norm = _normalize_for_similarity(source)
+    candidate_norm = _normalize_for_similarity(candidate)
+    if not source_norm or not candidate_norm:
+        return False
+
+    ratio = SequenceMatcher(None, source_norm, candidate_norm).ratio()
+    # If the generated text is basically the same as source, force fallback rewrite.
+    return ratio >= 0.86
+
+
+def _normalize_for_similarity(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", "", text.lower())).strip()
+
+
+def _rule_based_simplify(text: str) -> str:
+    simplified = _replace_medical_terms(text)
+
+    for phrase, plain in PLAIN_LANGUAGE_REPLACEMENTS.items():
+        simplified = re.sub(rf"\b{re.escape(phrase)}\b", plain, simplified, flags=re.IGNORECASE)
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", simplified) if s.strip()]
+    if not sentences:
+        return "No readable text was found in this document."
+
+    key_points = []
+    for sentence in sentences[:4]:
+        cleaned_sentence = sentence[0].upper() + sentence[1:] if len(sentence) > 1 else sentence.upper()
+        key_points.append(f"- {cleaned_sentence}")
+
+    return "Main points in simple language:\n" + "\n".join(key_points)
 
 
 def extract_important_terms(text: str) -> list[str]:
