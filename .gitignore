@@ -17,7 +17,6 @@ backend/.env
 .dist
 data/
 model_cache/
-/models/
 
 # local-only docs
 README.render.local.md

@@ -1,140 +1,116 @@
 # Medical Report Simplifier
 
-A clean, startup-style MVP that helps users upload medical reports/prescriptions and receive simple, patient-friendly explanations.
+Medical Report Simplifier is a full-stack app that lets users upload medical reports, run OCR, and get patient-friendly plus caregiver-focused explanations.
 
-## 1) Chosen stack
+## Tech Stack
 
-- Frontend: Next.js (App Router) + TypeScript + Tailwind CSS
-- Backend: FastAPI + SQLAlchemy
-- Database: PostgreSQL
-- Authentication: JWT (login/signup/logout)
-- OCR: Tesseract OCR (`pytesseract`) + PDF rendering (`PyMuPDF`)
-- AI Simplification: lightweight transformer pipeline (`flan-t5-small`) with medical-term replacement fallback
+- Frontend: Next.js 14 (App Router), TypeScript, Tailwind CSS
+- Backend: FastAPI
+- Database: MongoDB (Motor + Beanie ODM)
+- Auth: JWT (signup/login)
+- OCR: PyMuPDF + pytesseract
+- Simplification: transformer-based summarization with safe fallback logic
 
-## 2) Folder structure
+## Project Structure
 
-- frontend/: Next.js UI app
-- backend/: FastAPI API app
-- database/: SQL schema
+- frontend: Next.js web app
+- backend: FastAPI API app
+- training: model training/evaluation scripts
+- utils: shared training utilities
+- data: datasets used for training/evaluation
 
-Key paths:
-- frontend/app/: landing, auth, dashboard, report detail pages
-- frontend/components/: reusable UI sections
-- frontend/lib/: API client, auth store, types
-- backend/app/routers/: auth + report APIs
-- backend/app/services/: OCR + simplification logic
-- backend/app/models/: SQLAlchemy models
-- backend/app/core/: config, DB, security
+Important backend folders:
 
-## 3) Database schema
+- backend/app/core: app config, database init, security
+- backend/app/models: Beanie document models
+- backend/app/routers: API routes
+- backend/app/services: OCR and simplification services
 
-Tables:
-- users (`id`, `email`, `full_name`, `hashed_password`, `created_at`)
-- reports (`id`, `user_id`, `file_name`, `extracted_text`, `simplified_text`, `important_terms`, `created_at`)
+## Current Backend API
 
-SQL file: [database/schema.sql](database/schema.sql)
+Auth routes:
 
-## 4) Backend API plan
+- POST /auth/signup
+- POST /auth/login
 
-Auth:
-- `POST /auth/signup`
-- `POST /auth/login`
+Report routes:
 
-Reports:
-- `POST /reports/upload` (file upload → OCR → simplify → optional save)
-- `GET /reports` (user history)
-- `GET /reports/{id}` (single report detail)
+- POST /reports/upload
+- POST /reports/simplify-text
+- GET /reports
+- GET /reports/{report_id}
+- POST /reports/{report_id}/feedback
 
-Utility:
-- `GET /health`
+Utility route:
 
-## 5) UI plan
+- GET /health
 
-Landing:
-- Premium hero + gradient style
-- Feature cards
-- How it works
-- Benefits + CTA + footer
+## Environment Variables
 
-Auth:
-- Clean login/signup cards
-- Input validation
-- Clear loading/error states
+Backend (.env):
 
-Dashboard:
-- Welcome + quick stats cards
-- Polished upload card
-- Result card (original text + simplified + key terms)
-- History list with detail pages
+- SECRET_KEY (required)
+- ALGORITHM (default HS256)
+- ACCESS_TOKEN_EXPIRE_MINUTES (default 1440)
+- MONGODB_URL or MONGODB_URI (either is accepted)
+- DATABASE_NAME (default medical_report_simplifier)
+- CORS_ORIGINS (comma-separated origins)
+- TESSERACT_CMD (optional, needed when OCR binary is not in PATH)
+- SIMPLIFIER_BASE_MODEL (default google/flan-t5-small)
+- SIMPLIFIER_MODEL_PATH (optional local model path)
 
----
+Frontend (.env.local):
 
-## Setup instructions
+- NEXT_PUBLIC_API_URL (default /api)
+- BACKEND_ORIGIN (default http://localhost:8000)
 
-## Prerequisites
+## Local Setup
 
+Prerequisites:
+
+- Python 3.11
 - Node.js 18+
-- Python 3.11+
-- PostgreSQL running locally
-- Tesseract installed
-  - macOS: `brew install tesseract`
+- MongoDB running
+- Tesseract OCR installed (optional if only text input is used)
 
-## Backend setup
+Backend:
 
-1. Go to backend folder.
-2. Create and activate virtual environment.
-3. Install dependencies:
-   - `pip install -r requirements.txt`
-4. Copy env:
-   - `cp .env.example .env`
-5. Update `DATABASE_URL`, `SECRET_KEY`, and `TESSERACT_CMD` in `.env`.
-6. Run API:
-   - `uvicorn app.main:app --reload`
+1. Open terminal in backend
+2. Create and activate virtual environment
+3. Install dependencies: pip install -r requirements.txt
+4. Create .env from .env.example and set values
+5. Run API: uvicorn app.main:app --reload
 
-API will run on `http://localhost:8000`.
+Frontend:
 
-## Frontend setup
+1. Open terminal in frontend
+2. Install dependencies: npm install
+3. Create .env.local from .env.local.example
+4. Run app: npm run dev
 
-1. Go to frontend folder.
-2. Install dependencies:
-   - `npm install`
-3. Copy env:
-   - `cp .env.local.example .env.local`
-4. Run app:
-   - `npm run dev`
+By default:
 
-Frontend will run on `http://localhost:3000`.
+- Backend runs on http://localhost:8000
+- Frontend runs on http://localhost:3000
 
-Set `BACKEND_ORIGIN` in `frontend/.env.local` if your API runs on a different host/port. All frontend calls go through `/api` and are proxied to this backend, avoiding CORS issues.
+## Render Deployment Notes
 
----
+Backend service:
+
+- Root Directory: backend
+- Build Command: pip install -r requirements.txt
+- Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+Frontend service:
+
+- Root Directory: frontend
+- Build Command: npm install && npm run build
+- Start Command: npm run start
+
+Make sure backend CORS_ORIGINS includes your frontend Render URL.
 
 ## Notes
 
-- The simplification pipeline uses `flan-t5-small`; if loading fails, the app falls back to a rule-based simplifier.
-- Uploaded files are stored in `backend/uploads`.
-- This is an MVP for demo/final-year project use.
-
-## Training the simplifier model
-
-Use Python 3.11 for training dependencies, then run:
-
-1. `cd backend`
-2. `py -3.11 -m venv .venv311`
-3. `.venv311\\Scripts\\activate`
-4. `pip install -r requirements.txt -r requirements-training.txt`
-5. Shared training pairs are automatically saved to MongoDB (`training_samples`) when users save a report.
-6. Train from shared MongoDB data (curated mode, default):
-   - `python -m app.services.train_simplifier --source mongodb --output-dir ./model_cache/simplifier`
-   - Curated mode prioritizes corrected feedback and rating-threshold samples.
-7. If you want to include generated (non-corrected) samples too:
-   - `python -m app.services.train_simplifier --source mongodb --include-generated --output-dir ./model_cache/simplifier`
-8. Optional: disable caregiver-style pairs during training:
-   - `python -m app.services.train_simplifier --source mongodb --no-include-caregiver --output-dir ./model_cache/simplifier`
-9. Optional: tune quality thresholds for corrected feedback:
-   - `python -m app.services.train_simplifier --source mongodb --min-clarity-rating 4 --min-accuracy-rating 4 --output-dir ./model_cache/simplifier`
-10. Optional: combine MongoDB pairs + local file pairs:
-   - `python -m app.services.train_simplifier --source both --data path/to/simplify_pairs.jsonl --output-dir ./model_cache/simplifier`
-11. Set `SIMPLIFIER_MODEL_PATH=./model_cache/simplifier` in `backend/.env`.
-
-The API contract remains unchanged: existing report upload and simplify routes continue to work.
+- Uploaded files are stored in backend/uploads.
+- OCR for scanned image/PDF files requires Tesseract.
+- If the model is unavailable, simplification falls back to a deterministic safe output path.

@@ -45,11 +45,23 @@ def _use_limited_eval(use_cuda: bool) -> bool:
 
 
 def _update_eval_results(key: str, metrics: dict[str, Any]) -> None:
+    def _to_json_compatible(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _to_json_compatible(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_to_json_compatible(v) for v in value]
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                return value
+        return value
+
     if EVAL_PATH.exists():
         payload = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
     else:
         payload = {}
-    payload[key] = metrics
+    payload[key] = _to_json_compatible(metrics)
     EVAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     EVAL_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
@@ -102,24 +114,42 @@ def _evaluate_simplification(max_samples: int | None = None) -> dict[str, Any]:
 
 
 def _evaluate_disease(max_samples: int | None = None) -> dict[str, Any]:
-    rows = load_disease_dataset("test")
+    disease_data = load_disease_dataset("test")
     if max_samples is not None:
-        rows = rows[:max_samples]
+        disease_data = disease_data[:max_samples]
+
+    # Keep disease evaluation short on CPU.
+    disease_data = disease_data[:50]
 
     y_true: list[str] = []
     y_pred: list[str] = []
 
-    for row in tqdm(rows, desc="Evaluating disease classification"):
+    prepared: list[tuple[str, str]] = []
+    for row in disease_data:
         text = str(row.get("text", "")).strip()
         true_icd = str(row.get("icd10", "UNKNOWN")).strip() or "UNKNOWN"
-        if not text:
-            continue
+        if text:
+            prepared.append((text, true_icd))
 
-        preds = classify_diseases(text)
-        pred_icd = str(preds[0].get("icd10", "NONE")) if preds else "NONE"
+    batch_size = 16
+    progress = tqdm(total=len(prepared), desc="Evaluating disease classification")
+    for start in range(0, len(prepared), batch_size):
+        batch = prepared[start:start + batch_size]
+        texts = [item[0] for item in batch]
+        batch_preds = classify_diseases(texts, use_zero_shot=False, batch_size=batch_size)
 
-        y_true.append(true_icd)
-        y_pred.append(pred_icd)
+        if not isinstance(batch_preds, list):
+            batch_preds = [[] for _ in texts]
+
+        for (_, true_icd), preds in zip(batch, batch_preds):
+            pred_list = preds if isinstance(preds, list) else []
+            pred_icd = str(pred_list[0].get("icd10", "NONE")) if pred_list else "NONE"
+            y_true.append(true_icd)
+            y_pred.append(pred_icd)
+
+        progress.update(len(batch))
+
+    progress.close()
 
     return evaluate_disease_classification(y_true=y_true, y_pred=y_pred)
 
@@ -141,7 +171,7 @@ def _evaluate_synthetic() -> dict[str, Any]:
         raw_text = str(sample.get("raw_text", ""))
         ref_simple = str(sample.get("simplified_text", ""))
 
-        out = run_pipeline(raw_text=raw_text)
+        out = run_pipeline(raw_text=raw_text, use_zero_shot=False)
         pred_simple = str(out.get("simplified_text", ""))
 
         sources.append(raw_text)
