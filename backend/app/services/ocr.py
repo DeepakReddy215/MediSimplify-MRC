@@ -7,12 +7,20 @@ from pathlib import Path
 
 import fitz
 import pytesseract
+import requests
 from PIL import Image, UnidentifiedImageError
 from app.core.config import get_settings
 
 settings = get_settings()
 DEFAULT_TESSERACT_CMD = "/usr/bin/tesseract"
 VERIFY_TESSERACT_ON_STARTUP = environ.get("VERIFY_TESSERACT_ON_STARTUP", "1").strip() == "1"
+OCR_SPACE_API_KEY = environ.get("OCR_SPACE_API_KEY", "").strip()
+OCR_SPACE_ENDPOINT = environ.get("OCR_SPACE_ENDPOINT", "https://api.ocr.space/parse/image").strip() or "https://api.ocr.space/parse/image"
+
+try:
+    OCR_SPACE_TIMEOUT_SECONDS = int(environ.get("OCR_SPACE_TIMEOUT_SECONDS", "45").strip())
+except ValueError:
+    OCR_SPACE_TIMEOUT_SECONDS = 45
 
 _TESSERACT_PROBED = False
 _TESSERACT_READY = False
@@ -140,6 +148,77 @@ def _require_tesseract() -> None:
         )
 
 
+def _extract_text_with_ocr_space(image_bytes: bytes, file_name: str) -> str:
+    if not OCR_SPACE_API_KEY:
+        raise OCRUnavailableError(
+            "OCR engine is unavailable on this server. Set OCR_SPACE_API_KEY for cloud OCR fallback."
+        )
+
+    payload = {
+        "language": "eng",
+        "isOverlayRequired": "false",
+        "scale": "true",
+        "OCREngine": "2",
+    }
+    headers = {"apikey": OCR_SPACE_API_KEY}
+    files = {"file": (file_name, image_bytes, "image/png")}
+
+    try:
+        response = requests.post(
+            OCR_SPACE_ENDPOINT,
+            data=payload,
+            files=files,
+            headers=headers,
+            timeout=OCR_SPACE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException as exc:
+        raise OCRUnavailableError(f"Cloud OCR request failed: {exc}") from exc
+    except ValueError as exc:
+        raise OCRUnavailableError("Cloud OCR returned invalid JSON response.") from exc
+
+    if data.get("IsErroredOnProcessing"):
+        errors = data.get("ErrorMessage")
+        if isinstance(errors, list):
+            details = " | ".join(str(error) for error in errors if error)
+        elif isinstance(errors, str):
+            details = errors
+        else:
+            details = "unknown OCR processing error"
+        raise OCRUnavailableError(f"Cloud OCR failed: {details}")
+
+    parsed_results = data.get("ParsedResults") or []
+    if not isinstance(parsed_results, list):
+        raise OCRUnavailableError("Cloud OCR response format is invalid.")
+
+    text_chunks: list[str] = []
+    for result in parsed_results:
+        if isinstance(result, dict):
+            parsed_text = result.get("ParsedText", "")
+            if isinstance(parsed_text, str) and parsed_text.strip():
+                text_chunks.append(" ".join(parsed_text.split()))
+
+    if not text_chunks:
+        raise OCRUnavailableError("Cloud OCR returned no text.")
+
+    return "\n".join(text_chunks)
+
+
+def _extract_text_from_png_bytes(png_bytes: bytes, file_name: str) -> str:
+    if _ensure_tesseract_cmd():
+        try:
+            with Image.open(io.BytesIO(png_bytes)) as raw_image:
+                image = raw_image.convert("RGB")
+            text = pytesseract.image_to_string(image)
+            if text.strip():
+                return " ".join(text.split())
+        except pytesseract.TesseractNotFoundError:
+            pass
+
+    return _extract_text_with_ocr_space(png_bytes, file_name)
+
+
 def extract_text_from_file(file_name: str, file_bytes: bytes) -> str:
     lower_name = file_name.lower()
 
@@ -150,18 +229,16 @@ def extract_text_from_file(file_name: str, file_bytes: bytes) -> str:
 
 
 def _extract_text_from_image(file_bytes: bytes) -> str:
-    _require_tesseract()
     try:
         with Image.open(io.BytesIO(file_bytes)) as raw_image:
             image = raw_image.convert("RGB")
-        text = pytesseract.image_to_string(image)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            normalized_png = buffer.getvalue()
     except UnidentifiedImageError as exc:
         raise OCRUnavailableError("Unsupported or corrupted image file.") from exc
-    except pytesseract.TesseractNotFoundError as exc:
-        raise OCRUnavailableError(
-            "OCR engine is not available. Install Tesseract and retry."
-        ) from exc
-    return " ".join(text.split())
+
+    return _extract_text_from_png_bytes(normalized_png, "upload.png")
 
 
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -176,20 +253,13 @@ def _extract_text_from_pdf(file_bytes: bytes) -> str:
         if embedded_text_pages:
             return "\n".join(embedded_text_pages)
 
-        _require_tesseract()
-
         pages: list[str] = []
 
-        try:
-            for page in doc:
-                pix = page.get_pixmap(dpi=220)
-                with Image.open(io.BytesIO(pix.tobytes("png"))) as raw_image:
-                    image = raw_image.convert("RGB")
-                page_text = pytesseract.image_to_string(image)
+        for page_index in range(len(doc)):
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(dpi=220)
+            page_text = _extract_text_from_png_bytes(pix.tobytes("png"), f"page-{page_index}.png")
+            if page_text.strip():
                 pages.append(page_text)
-        except pytesseract.TesseractNotFoundError as exc:
-            raise OCRUnavailableError(
-                "OCR engine is not available. Install Tesseract and retry."
-            ) from exc
 
-        return "\n".join(" ".join(page.split()) for page in pages if page.strip())
+        return "\n".join(pages)

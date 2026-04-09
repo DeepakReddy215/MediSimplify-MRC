@@ -10,3 +10,4 @@ email-validator==2.2.0
 pytesseract==0.3.13
 Pillow==11.0.0
 PyMuPDF==1.25.1
+requests==2.32.3
